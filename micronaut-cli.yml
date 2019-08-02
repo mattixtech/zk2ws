@@ -1,0 +1,5 @@
+profile: service
+defaultPackage: net.mattixtech.zk2ws
+---
+testFramework: spock
+sourceLanguage: groovy

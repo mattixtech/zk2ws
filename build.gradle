@@ -1,0 +1,74 @@
+plugins {
+    id "io.spring.dependency-management" version "1.0.6.RELEASE"
+    id "groovy"
+    id "com.github.johnrengelman.shadow" version "4.0.2"
+    id "application"
+}
+
+
+
+version "0.1"
+group "net.mattixtech"
+
+repositories {
+    mavenCentral()
+    mavenLocal()
+    maven { url "https://jcenter.bintray.com" }
+}
+
+dependencyManagement {
+    imports {
+        mavenBom 'io.micronaut:micronaut-bom:1.1.4'
+    }
+}
+
+configurations {
+    // for dependencies that are needed for development only
+    developmentOnly 
+}
+
+dependencies {
+    compile "net.mattixtech:znode2flow:0.1-SNAPSHOT"
+    compile group: 'com.fasterxml.jackson.core', name: 'jackson-core', version: '2.9.9'
+    compile group: 'org.slf4j', name: 'slf4j-api', version: '1.7.28'
+
+
+    compile "io.micronaut:micronaut-http-client"
+    compile "io.micronaut:micronaut-http-server-netty"
+    compile "io.micronaut:micronaut-runtime-groovy"
+    compile "io.micronaut:micronaut-validation"
+    compile "javax.annotation:javax.annotation-api"
+    compileOnly "io.micronaut:micronaut-inject-groovy"
+    runtime "ch.qos.logback:logback-classic:1.2.3"
+    
+    testAnnotationProcessor "io.micronaut:micronaut-inject-java"
+    testCompile "org.junit.jupiter:junit-jupiter-api"
+    testCompile "io.micronaut.test:micronaut-test-junit5"
+    testCompile("org.spockframework:spock-core") {
+        exclude group: "org.codehaus.groovy", module: "groovy-all"
+    }
+    testCompile "io.micronaut:micronaut-inject-groovy"
+    testCompile "io.micronaut.test:micronaut-test-spock"
+    testCompile group: 'org.apache.curator', name: 'curator-test', version: '4.2.0'
+    testCompile group: 'org.awaitility', name: 'awaitility', version: '3.1.6'
+//    testRuntime "org.junit.jupiter:junit-jupiter-engine"
+    testRuntimeOnly "org.junit.vintage:junit-vintage-engine:5.3.0"
+}
+
+test.classpath += configurations.developmentOnly
+
+mainClassName = "net.mattixtech.zk2ws.Application"
+// use JUnit 5 platform
+test {
+    useJUnitPlatform()
+}
+
+shadowJar {
+    mergeServiceFiles()
+}
+
+run.classpath += configurations.developmentOnly
+run.jvmArgs('-noverify', '-XX:TieredStopAtLevel=1', '-Dcom.sun.management.jmxremote')
+tasks.withType(GroovyCompile) {
+    groovyOptions.forkOptions.jvmArgs.add('-Dgroovy.parameters=true')
+}
