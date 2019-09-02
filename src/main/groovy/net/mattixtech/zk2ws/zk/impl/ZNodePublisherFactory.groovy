@@ -25,8 +25,7 @@ class ZNodePublisherFactory implements PublisherFactory {
     @Memoized
     Flow.Publisher<byte[]> getPublisherForPath(String path) {
         Objects.requireNonNull(path)
-        def connectionString = Objects.requireNonNull(connectionStringFactory.getConnectionString())
 
-        return ZNodePublisher.withCachedCurator(connectionString, path)
+        return ZNodePublisher.withCachedCurator(connectionStringFactory.getConnectionString(), path)
     }
 }

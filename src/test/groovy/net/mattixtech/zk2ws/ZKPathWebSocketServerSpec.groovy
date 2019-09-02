@@ -68,9 +68,9 @@ class ZKPathWebSocketServerSpec extends Specification {
         curatorFramework.create().forPath(path, payload.getBytes())
 
         // Create the websocket connection and watch the test path
-        def client = webSocketClient.connect(ZKPathWebSocketClient, "/")
+        def client = webSocketClient.connect(ZKPathWebSocketTestClient, "/")
                 .blockingFirst()
-        client.send(objectMapper.writeValueAsString(new InboundWSMessage(watchPaths: [path])))
+        client.send(new InboundWSMessage(watchPaths: [path]))
 
         // Wait to see the initial value
         def originalMessage = new OutboundWSMessage(path: path, value: payload)

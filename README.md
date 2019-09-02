@@ -22,3 +22,9 @@ TODO
 
 ## Connecting via websocket
 TODO
+
+## Demo
+### Start a ZooKeeper docker instance
+`docker run -e ZOOKEEPER_IP="<HOST_IP>" -p 2181:2181 -d zookeeper`
+### Start a zk2ws instance docker instance
+TODO

@@ -1,8 +1,8 @@
 package net.mattixtech.zk2ws
 
-
 import groovy.transform.Canonical
 import groovy.transform.CompileStatic
+import groovy.transform.Synchronized
 import io.micronaut.websocket.WebSocketBroadcaster
 import io.micronaut.websocket.WebSocketSession
 import io.micronaut.websocket.annotation.OnClose
@@ -17,6 +17,8 @@ import org.slf4j.LoggerFactory
 
 import javax.inject.Inject
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentMap
 import java.util.concurrent.Flow
 
 /**
@@ -27,10 +29,26 @@ import java.util.concurrent.Flow
 class ZKPathWebSocketServer {
     private static final Logger LOG = LoggerFactory.getLogger(ZKPathWebSocketServer)
 
+    /**
+     * The publisher for a particular path.
+     */
     private final Map<String, Flow.Publisher<byte[]>> pathToPublisher = [:]
+
+    /**
+     * The subscriber associated with a particular path.
+     */
     private final Map<String, ZNodeSubscriber> pathToSubscriber = [:]
-    // TODO: Might be able to get rid of this if controller is per-connection
-    private final Map<String, Set<WebSocketSession>> pathToSessions = [:]
+
+    /**
+     * The sessions interested in a particular path.
+     */
+    private final ConcurrentMap<String, Set<WebSocketSession>> pathToSessions = [:] as ConcurrentHashMap
+
+    /**
+     * All of the paths being watched by a particular session.
+     */
+    private final ConcurrentMap<WebSocketSession, Set<String>> sessionToPaths = [:] as ConcurrentHashMap
+
     private final WebSocketBroadcaster broadcaster
 
     @Inject
@@ -57,66 +75,80 @@ class ZKPathWebSocketServer {
         // Watch all the given paths, initializing a publisher if necessary
         message.watchPaths?.each {
             if (message.unwatchPaths?.contains(it)) {
-                LOG.trace("Not watching path {} since it is being unwatched", it)
+                LOG.trace("Not watching path {} since it is being unwatched in this message", it)
                 return
             }
+
             LOG.trace("Processing watched path {}", it)
-            initPublisher(it)
+            initPublisherAsync(it)
+
             synchronized (pathToSessions) {
-                if (!pathToSessions[it]) {
-                    pathToSessions.put(it, [] as HashSet)
-                }
+                pathToSessions.putIfAbsent(it, [] as HashSet)
                 pathToSessions[it].add(session)
             }
+
+            sessionToPaths.putIfAbsent(session, [] as HashSet)
+            sessionToPaths.get(session)?.add(it)
         }
 
         // Unwatch all the given paths, destroying the publisher if no one is watching the path anymore
         message.unwatchPaths?.each {
+            LOG.trace("Processing unwatched path {}", it)
+            pathToSessions[it]?.remove(session)
+
             synchronized (pathToSessions) {
-                LOG.trace("Processing unwatched path {}", it)
-                pathToSessions[it].remove(session)
-                if (pathToSessions[it].isEmpty()) {
+                if (pathToSessions[it]?.isEmpty()) {
                     pathToSessions.remove(it)
-                    destroyPublisher(it)
+                    destroyPublisherAtomic(it)
                 }
             }
+
+            sessionToPaths.get(session)?.remove(it)
         }
     }
 
     @OnClose
     void onClose(WebSocketSession session) {
         LOG.debug("Session {} has been closed", session)
-        // TODO: Remove session from map
-    }
+        def watchedPaths = sessionToPaths.get(session)
+        sessionToPaths.remove(session)
 
-    private void initPublisher(String zkPath) {
-        // TODO: Is there any point in running this async...?
-        CompletableFuture.runAsync {
-            synchronized (pathToPublisher) {
-                if (!pathToPublisher[zkPath]) {
-                    LOG.debug("Initializing publisher for path {}", zkPath)
-                    def publisher = publisherFactory.getPublisherForPath(zkPath)
-                    def subscriber = new ZNodeSubscriber(zkPath)
-                    publisher.subscribe(subscriber)
-                    pathToPublisher[zkPath] = publisher
-                    pathToSubscriber[zkPath] = subscriber
-                }
-            }
-        }.whenComplete { v, t ->
-            if (t) {
-                LOG.warn("Error while initializing publisher", t)
-            }
+        watchedPaths.each {
+            pathToSessions.get(it)?.remove(session)
         }
     }
 
-    private void destroyPublisher(String zkPath) {
-        synchronized (pathToPublisher) {
-            if (pathToPublisher[zkPath]) {
-                LOG.debug("Destroying publisher for path {}", zkPath)
-                pathToPublisher.remove(zkPath)
-                pathToSubscriber[zkPath].cancel()
-                pathToSubscriber.remove(zkPath)
-            }
+    /**
+     * Initializing the publisher can block while connecting to ZooKeeper so we will init asynchronously.
+     */
+    private CompletableFuture<Void> initPublisherAsync(String zkPath) {
+        CompletableFuture.runAsync { initAndSubscribeAtomic(zkPath) }
+                .whenComplete { v, t ->
+                    if (t) {
+                        LOG.warn("Error while initializing publisher", t)
+                    }
+                }
+    }
+
+    @Synchronized
+    private void initAndSubscribeAtomic(String zkPath) {
+        if (!pathToPublisher[zkPath]) {
+            LOG.debug("Initializing publisher for path {}", zkPath)
+            def publisher = publisherFactory.getPublisherForPath(zkPath)
+            def subscriber = new ZNodeSubscriber(zkPath)
+            publisher.subscribe(subscriber)
+            pathToPublisher[zkPath] = publisher
+            pathToSubscriber[zkPath] = subscriber
+        }
+    }
+
+    @Synchronized
+    private void destroyPublisherAtomic(String zkPath) {
+        if (pathToPublisher[zkPath]) {
+            LOG.debug("Destroying publisher for path {}", zkPath)
+            pathToPublisher.remove(zkPath)
+            pathToSubscriber[zkPath].cancel()
+            pathToSubscriber.remove(zkPath)
         }
     }
 
@@ -133,7 +165,7 @@ class ZKPathWebSocketServer {
     @Canonical
     private class ZNodeSubscriber implements Flow.Subscriber<byte[]> {
         private final String zkPath
-        Flow.Subscription subscription
+        private Flow.Subscription subscription
 
         ZNodeSubscriber(String zkPath) {
             this.zkPath = Objects.requireNonNull(zkPath)
@@ -157,15 +189,13 @@ class ZKPathWebSocketServer {
             def message = new OutboundWSMessage(path: zkPath, value: new String(item))
 
             LOG.trace("Subscriber {} got new value {}", this, message)
-            synchronized (pathToSessions) {
-                broadcaster.broadcastSync(message) { session ->
-                    if (shouldForward(zkPath, session)) {
-                        LOG.trace("Sent message {}", message)
-                        return true
-                    }
-                    LOG.trace("No sessions are currently interested in path {}", zkPath)
-                    return false
+            broadcaster.broadcastSync(message) {
+                if (shouldForward(zkPath, it)) {
+                    LOG.trace("Sent message {}", message)
+                    return true
                 }
+                LOG.trace("No sessions are currently interested in path {}", zkPath)
+                return false
             }
 
             subscription.request(1)
